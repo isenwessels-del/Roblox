@@ -1,81 +1,64 @@
--- One allowlisted router is shared by remotes and server ProximityPrompt handlers.
+-- Remotes and all physical prompts share one narrow server-side action router.
 local Network = {}
 Network.__index = Network
-local groups = {
-    Gameplay = { RequestSteal = "Steal", RequestSell = "Sell", RequestPlaceItem = "Place", RequestPickupItem = "Pickup",
-        RequestUpgrade = "Upgrade", RequestEscape = "Escape", RequestEnterHouse = "EnterHouse", RequestDisableSecurity = "DisableSecurity", RequestSprint = "Sprint" },
-    House = { RequestHouseUpgrade = "HouseUpgrade", RequestHouseCustomization = "Theme", RequestSecurityUpgrade = "SecurityUpgrade", RequestHouseVisit = "Visit" },
-    Quests = { RequestQuestClaim = "QuestClaim", RequestDailyClaim = "DailyClaim" },
-    Settings = { RequestSetting = "Setting" },
-    UI = { RequestSync = "Sync", Snapshot = false, Notification = false, RareItemFound = false, AlarmTriggered = false, HeatChanged = false, Announcement = false },
-}
+local allowed = { Sync = true, Buy = true, Steal = true, WildSteal = true, Sell = true,
+    Collect = true, CollectAll = true, Lock = true, Bat = true, Sprint = true, Train = true,
+    BaseUpgrade = true, TreadmillUpgrade = true, SecurityUpgrade = true, Daily = true,
+    Setting = true, OpenShop = true }
 function Network.new(ctx)
     local self = setmetatable({ Context = ctx, Remotes = {} }, Network)
-    local parent = Instance.new("Folder")
-    parent.Name, parent.Parent = "Remotes", ctx.ReplicatedStorage
-    for group, entries in pairs(groups) do
-        local folder = Instance.new("Folder")
-        folder.Name, folder.Parent = group, parent
-        self.Remotes[group] = {}
-        for name, action in pairs(entries) do
-            local event = Instance.new("RemoteEvent")
-            event.Name, event.Parent = name, folder
-            self.Remotes[group][name] = event
-            if action then
-                event.OnServerEvent:Connect(function(player, ...) self:Request(player, action, ...) end)
-            end
-        end
+    local folder = Instance.new("Folder")
+    folder.Name, folder.Parent = "HouseRemotes", ctx.ReplicatedStorage
+    for _, name in ipairs({ "Request", "Snapshot", "Notification", "Announcement" }) do
+        local remote = Instance.new("RemoteEvent")
+        remote.Name, remote.Parent = name, folder
+        self.Remotes[name] = remote
     end
+    self.Remotes.Request.OnServerEvent:Connect(function(player, action, a, b)
+        self:Request(player, action, a, b)
+    end)
     return self
 end
-function Network:Request(player, action, a, b, c, d)
+function Network:Request(player, action, a, b)
     local ctx = self.Context
+    if type(action) ~= "string" or #action > 32 or not allowed[action] then return end
     if ctx.Closing or not ctx.AntiExploit:Rate(player, action) then return end
-    local profile = ctx.Data:Get(player)
     if action == "Sync" then ctx.Publish(player); return end
-    if not profile or not ctx.Data:IsWritable(player) then ctx.Notify(player, "Your profile is loading or saving is unavailable.", "Warning"); return end
-    if action ~= "Setting" and action ~= "QuestClaim" and action ~= "DailyClaim" and not ctx.AntiExploit:ValidateMovement(player) then return end
-    local ok, message
-    if action == "Steal" then ok, message = ctx.Robbery:Steal(player, a)
-    elseif action == "EnterHouse" then ok, message = ctx.Robbery:Enter(player, a)
-    elseif action == "Escape" then ok, message = ctx.Robbery:Escape(player)
-    elseif action == "Sell" then ok, message = ctx.Economy:Sell(player, a, b)
-    elseif action == "Place" then ok, message = ctx.House:Place(player, a, b, c, d)
-    elseif action == "Pickup" then ok, message = ctx.House:Pickup(player, a)
-    elseif action == "Upgrade" then ok, message = ctx.Inventory:Upgrade(player, a)
-    elseif action == "HouseUpgrade" then ok, message = ctx.House:Upgrade(player, false)
-    elseif action == "SecurityUpgrade" then ok, message = ctx.House:Upgrade(player, true)
-    elseif action == "Theme" then ok, message = ctx.House:Customize(player, a)
-    elseif action == "DisableSecurity" then ok, message = ctx.Security:Disable(player, a)
-    elseif action == "QuestClaim" then ok, message = ctx.Quest:Claim(player, a)
-    elseif action == "DailyClaim" then ok, message = ctx.Quest:ClaimDaily(player)
-    elseif action == "InspectSecurity" then
-        if a == player.UserId and ctx.House:AtHome(player) then ctx.Notify(player, "Your house is protected. Upgrade security in the House menu.", "House") end
-    elseif action == "OpenShop" then
-        if ctx.AntiExploit:Near(player, ctx.World.ShopPosition, ctx.Config.Game.ShopRadius) then
-            ctx.Remotes.UI.Notification:FireClient(player, "Open the Shop or Inventory tab to sell stored items.", "Shop")
-        end
-    elseif action == "Sprint" then
-        if typeof(a) == "boolean" then
-            local _, humanoid = ctx.AntiExploit:Character(player)
-            if humanoid then humanoid.WalkSpeed = if a then ctx.Config.Game.SprintSpeed else ctx.Config.Game.MoveSpeed end
-        end
-    elseif action == "Setting" then
-        local allowed = { Music = true, SFX = true, Notifications = true, ReducedEffects = true, CameraShake = true }
-        if typeof(a) == "string" and allowed[a] and typeof(b) == "boolean" then profile.Settings[a] = b; ctx.Publish(player)
-        elseif a == "UIScale" and typeof(b) == "number" and b == b and b >= 0.8 and b <= 1.3 then profile.Settings.UIScale = b; ctx.Publish(player) end
-    elseif action == "Visit" then
-        if typeof(a) == "number" and a % 1 == 0 then
-            for _, target in ipairs(ctx.Players:GetPlayers()) do
-                if target.UserId == a then
-                    local plot = ctx.World:GetPlot(target)
-                    if plot and ctx.AntiExploit:Near(player, plot.Origin, 40) then
-                        ok, message = true, target.DisplayName .. "'s house value: $" .. ctx.House:Value(target)
-                    end
-                end
-            end
-        end
+    -- A frozen/dead player may still stop their own training or sprint state.
+    if (action == "Train" or action == "Sprint") and a == false then
+        if action == "Train" then ctx.Progression:Train(player, false) else ctx.Progression:SetSprint(player, false) end
+        return
     end
-    if message then ctx.Notify(player, message, if ok then "Success" else "Warning") end
+    local profile = ctx.Data:Get(player)
+    if not profile or not ctx.Ready[player] or not ctx.Data:IsWritable(player) then
+        ctx.Notify(player, "Your progress is loading or saving is unavailable.", "Warning"); return
+    end
+    if action ~= "Setting" and not ctx.AntiExploit:ValidateMovement(player) then return end
+    local ok, message
+    if action == "Buy" then
+        if ctx.Validation.Id(a, 64) then ok, message = ctx.Houses:Buy(player, a) end
+    elseif action == "Steal" then
+        if ctx.Validation.Id(a, 44) then ok, message = ctx.Steal:Attempt(player, a) end
+    elseif action == "WildSteal" then
+        if ctx.Validation.Id(a, 44) then ok, message = ctx.Steal:AttemptWild(player, a) end
+    elseif action == "Sell" then
+        if ctx.Validation.Id(a, 44) and (b == nil or type(b) == "boolean") then ok, message = ctx.Houses:Sell(player, a, b) end
+    elseif action == "Collect" then
+        if ctx.Validation.Id(a, 44) then ok, message = ctx.Houses:Collect(player, a) end
+    elseif action == "CollectAll" then ok, message = ctx.Houses:Collect(player)
+    elseif action == "Lock" then ok, message = ctx.Progression:Lock(player)
+    elseif action == "Bat" then ok, message = ctx.Steal:Bat(player)
+    elseif action == "Sprint" and type(a) == "boolean" then ok, message = ctx.Progression:SetSprint(player, a)
+    elseif action == "Train" and type(a) == "boolean" then ok, message = ctx.Progression:Train(player, a)
+    elseif action == "BaseUpgrade" then ok, message = ctx.Progression:BaseUpgrade(player)
+    elseif action == "TreadmillUpgrade" then ok, message = ctx.Progression:TreadmillUpgrade(player)
+    elseif action == "SecurityUpgrade" then ok, message = ctx.Progression:SecurityUpgrade(player)
+    elseif action == "Daily" then ok, message = ctx.Progression:ClaimDaily(player)
+    elseif action == "OpenShop" then ctx.Notify(player, "Open the house shop and upgrade your base here.", "Shop")
+    elseif action == "Setting" then
+        local settings = { Music = true, SFX = true, ReducedEffects = true }
+        if type(a) == "string" and settings[a] and type(b) == "boolean" then profile.Settings[a] = b; ctx.Publish(player) end
+    end
+    if message then ctx.Notify(player, message, ok and "Success" or "Warning") end
 end
 return Network

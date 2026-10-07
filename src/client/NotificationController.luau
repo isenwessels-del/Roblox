@@ -1,49 +1,80 @@
 --!nonstrict
+local Widgets = require(script.Parent.Widgets)
 local TweenService = game:GetService("TweenService")
-local W = require(script.Parent.Widgets)
 local Notifications = {}
 Notifications.__index = Notifications
 
-function Notifications.new(ctx)
-    local self = setmetatable({ Context = ctx, Queue = {} }, Notifications)
-    self.Container = W.Make("Frame", { BackgroundTransparency = 1, Position = UDim2.new(1, -12, 0, 178),
-        AnchorPoint = Vector2.new(1, 0), Size = UDim2.new(0.9, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 60 }, ctx.UI.Gui)
-    W.Make("UISizeConstraint", { MaxSize = Vector2.new(390, 600) }, self.Container)
-    W.Make("UIListLayout", { Padding = UDim.new(0, 7), HorizontalAlignment = Enum.HorizontalAlignment.Right }, self.Container)
+function Notifications.new(ui)
+    local self = setmetatable({ UI = ui, Queue = {}, Running = false, Destroyed = false }, Notifications)
+    ui.Toast = function(text, kind) self:Push(text, kind) end
     return self
 end
 
-function Notifications:Push(text, kind, force, overrideColor)
-    local settings = self.Context.State and self.Context.State.Profile.Settings or {}
-    if settings.Notifications == false and not force and kind ~= "Error" and kind ~= "Alarm" then return end
-    if type(text) == "table" then text = text.Text or text.Message or "Notification" end
-    text = tostring(text)
-    local color = overrideColor or (if kind == "Error" or kind == "Alarm" then W.Colors.Danger elseif kind == "Warning" then W.Colors.Orange else W.Colors.Teal)
-    local toast = W.Make("TextLabel", { BackgroundColor3 = W.Colors.Panel, BorderSizePixel = 0,
-        Text = text, TextColor3 = color, Font = Enum.Font.GothamMedium, TextSize = 15, TextWrapped = true,
-        Size = UDim2.new(1, 0, 0, 65), ZIndex = 60 }, self.Container)
-    W.Round(toast, 10)
-    W.Make("UIStroke", { Color = color, Thickness = 1, Transparency = 0.5 }, toast)
-    W.Make("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, toast)
-    table.insert(self.Queue, toast)
-    if #self.Queue > 3 then local old = table.remove(self.Queue, 1); old:Destroy() end
-    if not settings.ReducedEffects then
-        toast.TextTransparency, toast.BackgroundTransparency = 1, 1
-        TweenService:Create(toast, TweenInfo.new(0.18), { TextTransparency = 0, BackgroundTransparency = 0.03 }):Play()
+function Notifications:SetSettings(settings)
+    self.ReducedEffects = settings and settings.ReducedEffects == true
+    if self.ReducedEffects and self.Tween then
+        self.Tween:Cancel()
+        if self.Current then
+            self.Current.BackgroundTransparency, self.Current.TextTransparency = 0, 0
+        end
     end
-    task.delay(if force then 7 else 4, function()
-        local index = table.find(self.Queue, toast)
-        if index then table.remove(self.Queue, index) end
-        if toast.Parent then toast:Destroy() end
+end
+
+function Notifications:Push(text, kind, extra)
+    if self.Destroyed or type(text) ~= "string" then return end
+    if kind == "Shop" then
+        if self.UI.Menu ~= "Shop" then self.UI:Open("Shop") end
+        return
+    end
+    if kind == "ConfirmSell" then
+        if type(extra) == "string" then self.UI:Open("Sell", extra) end
+        return
+    end
+    if #self.Queue >= 6 then table.remove(self.Queue, 1) end
+    table.insert(self.Queue, { Text = text:sub(1, 420), Kind = kind })
+    self:ShowNext()
+end
+
+function Notifications:ShowNext()
+    if self.Running or self.Destroyed or #self.Queue == 0 then return end
+    self.Running = true
+    local entry = table.remove(self.Queue, 1)
+    local color = if entry.Kind == "Error" then Widgets.Colors.Danger
+        elseif entry.Kind == "Announcement" then Widgets.Colors.Orange else Widgets.Colors.Teal
+    local label = Widgets.Make("TextLabel", {
+        Size = UDim2.fromScale(1, 1), BackgroundColor3 = color, BorderSizePixel = 0,
+        Text = entry.Text, TextColor3 = Widgets.Colors.Text, TextWrapped = true,
+        TextSize = 16, Font = Enum.Font.GothamBold, ZIndex = 20,
+    }, self.UI.NoticeArea)
+    Widgets.Round(label, 12)
+    Widgets.Make("UIPadding", {
+        PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+        PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+    }, label)
+    label.TextScaled = true
+    Widgets.Make("UITextSizeConstraint", { MinTextSize = 11, MaxTextSize = 16 }, label)
+    self.Current = label
+    if not self.ReducedEffects then
+        label.BackgroundTransparency, label.TextTransparency = 1, 1
+        self.Tween = TweenService:Create(label, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 0, TextTransparency = 0,
+        })
+        self.Tween:Play()
+    end
+    self.Timer = task.delay(5, function()
+        if self.Destroyed then return end
+        label:Destroy()
+        self.Current, self.Running = nil, false
+        self:ShowNext()
     end)
 end
 
-function Notifications:Rare(data)
-    if type(data) ~= "table" then return end
-    local rarity = self.Context.Config.Rarities[data.Rarity]
-    self:Push(tostring(data.Rarity or "Rare") .. " FIND!  " .. tostring(data.Name or data.ItemId)
-        .. "  •  $" .. W.Number(data.Value) .. "\nEscape and return home to secure it.", "Rare", true, if rarity then W.Color(rarity.Color) else nil)
-    self.Context.Audio:Play("Rare")
+function Notifications:Destroy()
+    self.Destroyed = true
+    if self.Tween then self.Tween:Cancel() end
+    if self.Timer and coroutine.status(self.Timer) ~= "dead" then task.cancel(self.Timer) end
+    if self.Current then self.Current:Destroy() end
+    self.Queue = {}
 end
 
 return Notifications

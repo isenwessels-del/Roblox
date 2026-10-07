@@ -2,11 +2,11 @@
 -- UI construction and formatting only; no economy state is changed here.
 local Widgets = {}
 Widgets.Colors = {
-    Background = Color3.fromRGB(13, 21, 34), Panel = Color3.fromRGB(22, 34, 51),
-    Raised = Color3.fromRGB(31, 46, 65), Stroke = Color3.fromRGB(56, 75, 95),
-    Text = Color3.fromRGB(237, 245, 250), Muted = Color3.fromRGB(161, 181, 197),
-    Teal = Color3.fromRGB(66, 228, 196), Orange = Color3.fromRGB(255, 182, 83),
-    Danger = Color3.fromRGB(255, 104, 128),
+    Background = Color3.fromRGB(224, 243, 255), Panel = Color3.fromRGB(250, 253, 255),
+    Raised = Color3.fromRGB(231, 241, 249), Stroke = Color3.fromRGB(167, 197, 216),
+    Text = Color3.fromRGB(24, 49, 70), Muted = Color3.fromRGB(68, 94, 111),
+    Teal = Color3.fromRGB(74, 211, 177), Orange = Color3.fromRGB(255, 193, 82),
+    Danger = Color3.fromRGB(255, 153, 158),
 }
 
 function Widgets.Make(className, properties, parent)
@@ -80,11 +80,20 @@ end
 
 function Widgets.Number(number)
     number = tonumber(number) or 0
+    if number ~= number or math.abs(number) == math.huge then number = 0 end
     local abs = math.abs(number)
-    for _, suffix in ipairs({ {1e9, "B"}, {1e6, "M"}, {1e3, "K"} }) do
+    for _, suffix in ipairs({ {1e12, "T"}, {1e9, "B"}, {1e6, "M"}, {1e3, "K"} }) do
         if abs >= suffix[1] then return string.format("%.1f%s", number / suffix[1], suffix[2]) end
     end
     return tostring(math.floor(number))
+end
+
+function Widgets.Enabled(button, enabled)
+    button.Active = enabled
+    button.Selectable = enabled
+    button.AutoButtonColor = enabled
+    button.BackgroundTransparency = if enabled then 0 else 0.45
+    button.TextTransparency = if enabled then 0 else 0.45
 end
 
 function Widgets.Color(hex)

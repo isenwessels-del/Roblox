@@ -1,33 +1,37 @@
-# Architecture and security review
+# Neighborhood architecture and security
 
-## Ownership and persistence
+`default.project.json` exports shared configuration/schema/utilities to ReplicatedStorage, server modules under one server Script, and client modules under one LocalScript. The previous furniture game is preserved on the earlier Git branch; its inactive services are not exported into this place.
 
-Every live profile is protected by an UpdateAsync lease containing a unique server/session token and wall-clock expiry. The same token must match on every save and release. Expired renewal freezes transactions before the lease can be taken by another server. Load failures, invalid saves, newer unknown schemas and active foreign sessions never produce a playable replacement default. Save snapshots do not replace the live in-memory table. Idempotent write markers support a committed request whose network response was lost.
+## Services
 
-Schema version2 separates UID-keyed Inventory and House.Furniture maps. Removed item definitions are archived recoverably. Root lifecycle hooks settle protected provisional loot before a profile freezes on departure/shutdown. Autosave defaults to90 seconds with180-second lease and safety margin. The system cannot promise durability through platform outages or a crash before a successful save. Ordered leaderboard records are secondary caches, not the source of currency or items.
+- `DataService`: private Version2 profiles, UpdateAsync session leases, immutable save snapshots, autosave, bounded retries, ambiguous-write markers, leaving and shutdown saves. The new schema uses separate neighborhood store names.
+- `OwnershipService`: one canonical house record per UID, expected-owner/revision compare-and-swap, idempotent operation IDs, uncached reads, and a durable per-owner discovery index.
+- `HouseService`: income, collection, house purchases/sales, starter gifts, wild awards, capacity, reserved slots and persisted transaction intents.
+- `WildHouseService`: bounded eighteen-site production, weighted designs/mutations, monotonic growth and exclusive provisional claims.
+- `StealService`: timestamped hold, LOS/distance validation, provisional carry, destination reservations, interruption, canonical transfer and uncertain-outcome reconciliation.
+- `ProgressionService`: earned speed, training, sprint, base/treadmill/security upgrades, finite base shields and UTC daily rewards.
+- `WorldService` / `ModelFactory`: procedural town, plots, pads, prefabs, models, labels, prompts, per-base gate collision groups and cleanup.
+- `GuardService`: server-controlled anchored landlords, grace period, territory radius, LOS catches and cached asynchronous pathfinding.
+- `PlayerService`: guarded load/plot assignment/ownership recovery, spawn, defense tool, death and cleanup. Duplicate join callbacks cannot claim another base or overwrite a loading profile.
+- `AntiExploitService` / `NetworkService`: one allowlisted request route, common rate buckets, living-character checks, finite position checks, cumulative movement allowance and server raycasts. Both remotes and prompts use the same router.
+- Client controllers display snapshots, confirmations, progress, menus and notifications, handle keyboard/touch/gamepad requests, and apply optional audio/accessibility preferences.
 
-## Item transitions
+## Ownership and economic recovery
 
-NPC world record → exclusive timed reservation → provisional robbery bag → home storage → display OR sale.
+Player profiles do **not** decide house ownership. `House_<UID>` is the canonical record containing owner, slot and revision. A recipient's durable `Owner_<UserId>` index receives the UID reference before a create/transfer commits. Loading an index verifies each canonical record; stale references cannot grant ownership. Incoming index references carry the target revision so an in-flight transfer is not mistakenly pruned by a concurrent load. UID records remain as tombstones after selling.
 
-Reservations use attempt identity, so a stale coroutine cannot cancel a newer reservation from the same player. Source records are consumed only once. All callers recheck character health, raycast line of sight, distance, target membership, active robbery, storage/backpack capacity and data writability. Provisional loot reserves storage so a gift cannot displace an already carried item. No asynchronous DataStore calls occur inside the validated in-memory item/currency transition.
+Purchases save the cash debit and exact UID intent before creation. Starter/wild awards also save their intended UID before creation. Sales save their intended payout and expected revision before tombstoning, then credit once when recovering that same operation. Repeated responses or rejoining finish the same operation. A failed initial save retains the intent instead of assuming nothing committed. The canonical ledger resolves duplicate profile references after crashes, and discovery does not depend on both profiles saving at the same instant.
 
-Placement uses server-rounded grid coordinates and approved rotations. Entire rotated footprints must fit within the tier's floor margin, clear the doorway, and avoid another placed item. IDs are moved rather than copied. Rare selling checks explicit confirmation and server shop proximity; prices are never accepted from the client.
+During player theft, the victim remains the canonical owner until delivery. A held UID and destination slot remain reserved during storage requests. Unknown outcomes freeze that transfer; a known unchanged record returns the house, a committed record applies ownership, and a later canonical operation refreshes the affected bases without rendering an old copy. Earlier uncollected rent stays with its earner. The transfer ledger is atomic per UID; cash/training/rent still use periodic profile saves and may lose unsaved increments on crashes.
 
-## Remotes and movement
+A departed player may have a prepared wild intent whose store outcome is unknown. That exact site remains reserved until canonical outcome recovery; the server does not release another copy on the assumption that a missing in-memory profile means no durable intent. Persistent storage failures can therefore leave a prefab/pad unavailable until recovery or server restart. This is a deliberate consistency tradeoff.
 
-Remotes are grouped by gameplay/house/quests/settings/UI. Server callbacks bind an allowlisted action; callers cannot choose arbitrary functions. Global and per-action token buckets bound request frequency. Prompts use the same router. Server-to-client notifications/snapshots have no reward callbacks.
+## Validation boundaries and limits
 
-Horizontal movement uses a cumulative distance budget replenished at the maximum authorized sprint speed. A20-stud burst covers latency; it is not reset per request. Legitimate delayed samples accrue their elapsed movement allowance. Server teleports are explicitly seeded. Suspicion logs are rate limited and create short gameplay restrictions, not permanent bans.
+Clients submit only allowlisted actions and bounded IDs/booleans. They cannot supply an income amount, price, rarity, size, owner, UID creation, world position, XP amount, claim day or completed theft. Purchases/sales/upgrades/claims revalidate server configuration, writable profiles and own-base position. Theft validates actual target models, distance, speed requirements, source ownership/revision, base locks, capacity, live characters and destination presence before committing. A loading victim is protected until join initialization completes. Locks have expiration and a cooldown after expiration; repeated activation cannot create perpetual protection.
 
-This is an anti-exploit foundation, not complete commercial anti-cheat. Vertical flight, noclip and sophisticated replication manipulation are not comprehensively detected. Server line-of-sight and location checks limit immediate theft rewards but cannot prove all character motion is legitimate. Evaluate false positives and tune movement tolerance in real multiplayer sessions before launch.
+Movement enforcement rejects impossible horizontal travel against a replenishing allowance derived from the actual server-earned movement mode. This is not comprehensive flight/noclip detection; physical gate collision and interaction raycasts support the checks, and competitive release still needs dedicated engine testing. Bat targets are chosen on the server with range, LOS, grounded-state and cooldown checks.
 
-## Performance and cleanup
+Owner indexes are capped at **256 references**. Verified old references are pruned, but references for permanently abandoned future revisions are intentionally retained because deleting an in-flight reference could orphan a house. A sufficiently large accumulation of abandoned incoming operations can block further ownership writes safely. Large-scale release needs a durable abandonment/maintenance protocol and real DataStore budget/latency testing. Do not clear canonical keys or only one of the profile/ownership stores to work around this.
 
-Runtime is event/timer based, with one0.5-second gameplay scheduler. Snapshots run approximately once per second per player. World loot is bounded by predefined spawn points; home storage is capped at200 items and each tier caps displayed furniture. Police have a global cap, safe spawn positions and cached path requests. Delayed paths check unit/generation validity before applying. Failed/past reservations, police, plot models, death connections, player caches and event lighting have cleanup paths.
-
-WorldService.Metrics and PoliceService.Metrics expose part/spawn/render/path/capture counters for Studio profiling. CLI adapters verify construction bounds and cleanup decisions; they cannot measure Roblox network or mobile rendering performance.
-
-## Deliberate launch boundaries
-
-NPC robberies are fully implemented. Player homes cannot be robbed; house security devices are visible customization/progression, while NPC security and counter-tools affect real heat/alarm timing. Trading, auctions, player loot recovery, premium transactions and licensed audio content are separate post-launch integrations. No placeholder remote awards rewards for them.
+Models, offers, reservations, guard routes and notifications are bounded. NPC path requests are cached and limited to active carries; stale yielding results are discarded. The implementation has not been performance-profiled in Roblox. CLI source tests use labelled engine adapters and do not establish real rendering, physics, native input, replication or service availability.

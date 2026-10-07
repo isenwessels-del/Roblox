@@ -1,45 +1,40 @@
-# Validation and Studio release checklist
+# Validation
 
-## Automated results
+The Linux cloud build compiled and exported **23 game scripts**, with exactly one server Script and one client LocalScript. Embedded place sources are compared as a multiset against all current source files. Rojo7.6.1 and Luau0.699 are pinned and their downloaded archives are checksum-verified.
 
-Run `python scripts/check.py` to refresh these results. All suites exercise current source files; adapters replace engine/service boundaries only.
+Run `python3 scripts/check.py` for the complete current suite. **3,374 checks pass:**
 
-| Suite | Passing checks | Boundary |
+| Suite | Checks | Evidence |
 | --- | ---: | --- |
-| Shared content, schema, utilities |359|Pure Luau, current63-item data and migration logic |
-| Persistence |75|Actual DataService, injected atomic DataStore and scheduling |
-| Progression/events/rankings/analytics |76|Actual services, injected services and clocks |
-| Integrated robbery/inventory/economy/houses/remotes/movement |88|Actual services, mocked character/world primitives |
-| World and furniture factory |632|Actual generation source, mocked Roblox Instance/math APIs |
-| Police |24|Actual controller decisions, mocked physics/pathfinding boundaries |
-| **Total** |**1,254**|**Does not include Studio engine validation** |
+| Shared config/schema | 635 | Actual definitions, balancing invariants, strict profile/intent validation and cloning. |
+| DataService | 75 | Actual service with injected atomic store: leases, retries, ambiguous writes, release and shutdown. |
+| OwnershipService | 127 | Actual canonical ledger: replay, CAS, owner discovery, incoming index races and unavailable stores. |
+| ProgressionService | 401 | Server clocks, lock expiry/cooldown, costs, capacity/training upgrades, XP and UTC daily claims. |
+| StealService | 96 | Holds, range/LOS, locks, contested carry, prepared wild intents, uncertain outcomes, reconciliation and bat checks. |
+| HouseService | 140 | Actual source and canonical ledger: saved debits, starter/wild recovery, tombstone sales, income banking, offline bounds and reserved capacity. |
+| NetworkService | 196 | Actual allowlisted routing, malformed arguments, sender identity, paused data and discarded client prices/stat values. |
+| WildHouseService | 143 | Weighted eligibility, monotonic growth, exclusive claims, frozen size, return and replacement timing. |
+| PlayerService | 45 | Duplicate joins, departed players, load/ownership errors, exhausted bases and bounded cleanup. |
+| World/ModelFactory | 1,498 | Production models with primitive engine adapters: seven bases, slots, footprints, gates, visible prompts, growth/build/carry cleanup. |
+| GuardService | 18 | Actual chase state: grace/radius, home/death/cancellation, LOS and cached/stale path handling. |
 
-Rojo build, exact source export and Luau compilation are separate checks. Tests executed, rather than only being listed. There are no claims that mocked navigation/rendering prove Roblox physics or device usability.
+Engine-dependent tests use explicit adapters for Instances, vectors, raycasts, characters, pathfinding and services. Counts refer to assertions, not Studio play sessions. They do not prove rendering, native input, real collision/network behavior, DataStore budgets or device performance. No Roblox Studio session was run from this workspace.
 
-## Required real Studio checks
+## Studio checklist — still required
 
-- [ ] Play creates the map without server/client Output errors; HUD finishes loading.
-- [ ] Two clients get unique plots, separate $500 balances, backpacks and homes.
-- [ ] Enter Starter Street, steal a small item; timer/heat/alarm/UI synchronize.
-- [ ] Two clients request the same loot: only one can reserve and consume it.
-- [ ] Leaving reach, obstructing LOS, death and disconnect cancel pending theft.
-- [ ] Escape on own green pad secures bag exactly once; another player's pad does not.
-- [ ] Police spawn at a safe distance, walk/path around walls, lose/search targets, return/despawn, catch only when appropriate, and cannot catch a player on their own home pad.
-- [ ] Catch/death loses only unsecured low rarity loot and protects rare loot when saving is writable; stored/displayed items remain.
-- [ ] Placement preview, rotated footprints, doorway margin, invalid/occupied coordinates and storage pickup match the server.
-- [ ] Sell at the shop, confirm valuables, replay requests, and verify exact currency/item ownership.
-- [ ] Upgrade house/backpack/tool/security and purchase/apply themes; count/statistics/value update.
-- [ ] Higher districts reject low-level robbery entry; higher tools alter security timing and panel disable works.
-- [ ] Tutorial advances in order and completes; quests/achievements/daily gifts cannot claim twice.
-- [ ] Collection persists secured discoveries and hides undiscovered Secret identities.
-- [ ] Five supported events start/end with correct modifiers and restore lighting.
-- [ ] Test persistent save/rejoin in a separate test experience/store namespace; verify furniture rotations, cash, quests, collection and level/XP remainder.
-- [ ] Test load denial/unavailable store without overwriting data; test two servers contesting a session and shutdown/autosave.
-- [ ] Global ordered rankings update on their coarse cadence; temporary Studio mode does not write leaderboards.
-- [ ] Phone/tablet portrait/landscape and gamepad can navigate menus, confirm sales, sprint, rotate/place/cancel, reset and return camera control.
-- [ ] Settings persist and reduce effects; add permitted audio IDs and verify sound toggles if enabling audio.
-- [ ] Use MicroProfiler/Script Performance and simulate network latency with eight clients. Inspect world/police counters; confirm acceptable frame time, network traffic and memory during repeat join/leave/robbery cycles.
+- [ ] Set maximum players7 and R15; open the checked-in place and confirm town generation, source startup and clean server/client Output.
+- [ ] Start at least two Server & Clients. Verify distinct bases, $500 and exactly one Starter Cottage per new player.
+- [ ] Collect rent physically and through HUD; buy a house at home; verify six-second construction and correct rent afterward.
+- [ ] Pick up a wild prefab after a two-second server hold; leave range mid-hold, contest it with a second player, die, get caught, time out and disconnect. Verify the original site/UID returns without an extra model.
+- [ ] Observe Big/Giant growth and mutations, freeze size at pickup, and verify higher income after construction. Train and upgrade a treadmill; confirm XP stops away from the station, on death or when data is unavailable.
+- [ ] Verify speed-gated districts, base slot upgrades and rejected full-base pickups/purchases.
+- [ ] Verify 30-second join shield, owner-only barrier passage, manual lock duration and expiry+cooldown; confirm repeatedly pressing Lock cannot extend an active lock.
+- [ ] Steal a completed rival house from an unlocked base. Interrupt with lock/bat/death/leave; then complete another theft and verify exactly one current owner and the victim's earlier rent retained.
+- [ ] Sell with confirmation, cancel sale, try during building/carry, and confirm payout matches design×mutation×size/2.
+- [ ] Test touch prompts/actions and compact screens. Test controller X interactions, D-pad Up menu, B close, selection, R2 defense, L3 run and Y train. Test optional sound IDs and ReducedEffects.
+- [ ] In a separate published test experience, change **both** store names, enable Studio API Services, enable StudioPersistence, and verify rejoining restores cash, speed, house UIDs, slots and claims.
+- [ ] Restart the server after purchase/sale/transfer and inspect saved canonical ownership. Verify data outages pause uncertain operations, never overwrite profiles, and recover pending intents after rejoin.
+- [ ] Validate offline rent boundaries, UTC daily rollover and streaks. Test seven-player occupancy and rejection of another player.
+- [ ] Profile seven-client rendering, replication, pathfinding and DataStore latency/budget. Check long sessions, shutdown timing and abandoned ownership-index maintenance before a public release.
 
-## Unexecuted external checks
-
-This cloud host has no Roblox Studio/runtime. Published DataStore permissions, actual Roblox physics/AI paths, model/UI appearance, replication, mobile/console usability and MicroProfiler measurements remain unexecuted. These are concrete release gates, not optional evidence of production readiness. Paid products are disabled and have not been tested.
+Do not use the earlier furniture game's1,254 checks to describe this implementation; they apply to the previous branch. This suite targets the current neighborhood game.

@@ -1,273 +1,271 @@
--- Deterministic tests against the actual modules, with only Roblox services injected.
-local QuestService = require("../src/server/QuestService")
-local EventService = require("../src/server/EventService")
-local LeaderboardService = require("../src/server/LeaderboardService")
-local AnalyticsService = require("../src/server/AnalyticsService")
-local Config = {
-    Economy = require("../src/shared/Config/EconomyConfig"),
-    Game = require("../src/shared/Config/GameConfig"),
-    Quests = require("../src/shared/Config/QuestConfig"),
-    Events = require("../src/shared/Config/EventConfig"),
-}
-
+-- Execute the real progression service with explicit clock/world/character
+-- boundaries. Engine rendering and real movement remain Studio checks.
+local Progression = require("../src/server/ProgressionService")
+local Config = require("../src/shared/Config")
 local checks = 0
 local function check(condition, message)
-    assert(condition, message)
-    checks += 1
+	assert(condition, message)
+	checks += 1
 end
 
-local now = 20000 * 86400 + 120
-local player = { UserId = 21, Name = "TestPlayer", DisplayName = "Test Player", Children = {} }
-function player:FindFirstChild(name) return self.Children[name] end
-local profile = {
-    Cash = 500, XP = 0, Level = 1, FirstJoin = true, TutorialStep = 1,
-    House = { HouseValue = 0 }, Statistics = {}, Quests = {},
-    Achievements = {}, Inventory = {}, OwnedThemes = { Default = true },
-}
-local writable = true
-local data = { Status = "StudioMemory" }
-function data:Get(target) return target == player and profile or nil end
-function data:IsWritable(_target) return writable end
-local queue = {}
-local function spawn(callback) table.insert(queue, callback) end
-local function drain()
-    local jobs = queue
-    queue = {}
-    for _, callback in ipairs(jobs) do callback() end
-end
-local telemetryCalls = 0
-local ctx = {
-    Config = Config, Data = data, Clock = function() return now end,
-    Publish = function() end, Notify = function() end, Log = function() end, Spawn = spawn,
-    AnalyticsBackend = { LogCustomEvent = function() telemetryCalls += 1 end },
-}
-ctx.Analytics = AnalyticsService.new(ctx)
-local quests = QuestService.new(ctx)
-quests:InitPlayer(player)
-check(#profile.Quests.Daily == 3, "Exactly three daily quests are assigned")
-check(#profile.Quests.Weekly == 2, "Weekly quests are assigned independently")
-local snapshot = quests:Get(player)
-for i, difficulty in ipairs({ "Easy", "Medium", "Hard" }) do
-    check(snapshot.Daily[i].Difficulty == difficulty, "Daily quests span three difficulty groups")
-end
-check(not quests:Claim(player, "WeeklyCollector"), "Incomplete weekly claim is rejected")
-check(not quests:Claim(player, {}), "Non-string quest claim is rejected")
-local assigned = profile.Quests.Daily[1]
-local definition = Config.Quests[assigned]
-quests:Progress(player, definition.Type, definition.Target, definition.Rarity)
-local beforeCash = profile.Cash
-check(quests:Claim(player, assigned), "Completed assigned quest can be claimed")
-check(profile.Cash == beforeCash + definition.Reward.Cash, "Exactly configured cash is granted")
-local claimedCash, claimedXP = profile.Cash, profile.XP
-check(not quests:Claim(player, assigned), "Quest cannot be claimed twice")
-check(profile.Cash == claimedCash and profile.XP == claimedXP, "Repeated claim is currency-idempotent")
-
-profile.Quests.Daily = { "FindRare" }
-profile.Quests.Progress["Daily:FindRare"] = 0
-quests:Progress(player, "FindRarity", 1, "Common")
-check(profile.Quests.Progress["Daily:FindRare"] == 0, "Wrong rarity cannot satisfy rare quest")
-quests:Progress(player, "FindRarity", 1, { Rarity = "Rare" })
-check(profile.Quests.Progress["Daily:FindRare"] == 1, "Server-observed matching rarity progresses quest")
-quests:Progress(player, "StealItems", 10)
-local weeklyBefore = profile.Quests.Progress["Weekly:WeeklyCollector"]
-local nextUtcDay = (math.floor(now / 86400) + 1) * 86400
-now = nextUtcDay
-quests:Tick(player, 10)
-check(profile.Quests.Day == math.floor(now / 86400), "Daily rollover follows UTC server day")
-check(profile.Quests.Claimed["Daily:" .. assigned] == nil, "Daily claim markers clear at rollover")
-if profile.Quests.Week == math.floor((20000 + 3) / 7) then
-    check(profile.Quests.Progress["Weekly:WeeklyCollector"] == weeklyBefore, "Daily rollover preserves same-week progress")
+local function fixture()
+	local player = { UserId = 7 }
+	local other = { UserId = 8 }
+	local profile = {
+		Cash = 1e9, Bank = 0, Rebirths = 0, BaseLevel = 1, TreadmillLevel = 1,
+		SpeedXP = 0, SecurityLevel = 1, DailyDay = -1, DailyStreak = 0,
+		Statistics = { TotalSpent = 0, TotalEarned = 0 },
+	}
+	local attrs = {}
+	local humanoid = { WalkSpeed = 20 }
+	function humanoid:SetAttribute(key, value) attrs[key] = value end
+	local plot = { Owner = player, LockPosition = "lock", TreadmillPosition = "treadmill" }
+	local f = { Player = player, Other = other, Profile = profile, Humanoid = humanoid,
+		Attributes = attrs, Plot = plot, Now = 0, Clock = 86400 * 100, Home = true,
+		Alive = true, Writable = true, Loaded = true, NearLock = true, NearTreadmill = true,
+		LockCalls = {}, TreadmillCalls = {}, SlotCalls = {}, Publications = 0, Notices = {} }
+	local ctx = { Config = Config, Data = {}, AntiExploit = {}, World = {},
+		Houses = { Busy = {} }, Steal = { Carriers = {} } }
+	ctx.Now = function() return f.Now end
+	ctx.Clock = function() return f.Clock end
+	function ctx.Data:Get(p) return if p == player and f.Loaded then profile else nil end
+	function ctx.Data:IsWritable(p) return p == player and f.Loaded and f.Writable end
+	function ctx.AntiExploit:Character(p)
+		if p == player and f.Alive then return {}, humanoid end
+		return nil
+	end
+	function ctx.AntiExploit:Near(p, position, radius)
+		check(p == player and radius == Config.Game.InteractionRadius, "configured server interaction radius")
+		if position == "lock" then return f.NearLock end
+		if position == "treadmill" then return f.NearTreadmill end
+		error("unexpected position")
+	end
+	function ctx.World:GetPlot(p) return if p == player then f.Plot else nil end
+	function ctx.World:AtHome(p) return p == player and f.Home end
+	function ctx.World:SetLock(p, locked, remaining)
+		check(p == plot and remaining >= 0, "lock renderer receives only own plot and finite remaining")
+		table.insert(f.LockCalls, { Locked = locked, Remaining = remaining })
+	end
+	function ctx.World:UpdateSlots(p, slots)
+		check(p == player, "base slots update only upgrading player")
+		table.insert(f.SlotCalls, slots)
+	end
+	function ctx.World:UpdateTreadmill(p, level, training)
+		check(p == player and type(training) == "boolean", "treadmill state is server boolean for owner")
+		table.insert(f.TreadmillCalls, { Level = level, Training = training })
+	end
+	ctx.Publish = function(p) check(p == player, "only affected player snapshot published"); f.Publications += 1 end
+	ctx.Notify = function(p, text, kind)
+		check(p == player and type(text) == "string" and type(kind) == "string", "server notifications bounded to owner")
+		table.insert(f.Notices, text)
+	end
+	f.Context = ctx
+	f.Service = Progression.new(ctx)
+	return f
 end
 
-local dailyCash = profile.Cash
-check(quests:ClaimDaily(player), "Initial daily reward can be claimed")
-check(profile.Cash == dailyCash + Config.Economy.DailyRewards[1].Cash, "Day one grants configured cash")
-check(profile.DailyReward.CurrentDay == 2, "Claim advances the seven-day cycle")
-local claimAt = now
-check(not quests:ClaimDaily(player), "Same-timestamp repeat daily claim is rejected")
-now -= 10
-check(not quests:ClaimDaily(player), "Clock moving backwards cannot grant another reward")
-now = claimAt + 86400
-check(quests:ClaimDaily(player), "Next reward becomes available only after interval")
-
-local storageFull = true
-local gifts = 0
-ctx.Inventory = {}
-function ctx.Inventory:CanStore(_target, _itemId) return not storageFull end
-function ctx.Inventory:AddStoredItem(_target, itemId, _reason)
-    gifts += 1
-    local entry = { UniqueId = "gift" .. gifts, ItemId = itemId, AcquiredAt = now }
-    profile.Inventory[entry.UniqueId] = entry
-    return entry
+do
+	local f = fixture()
+	local s, p = f.Service, f.Player
+	s:OnJoin(p)
+	check(s:IsLocked(p), "join grants shield")
+	check(s.Locks[p].Until == 30 and s.Locks[p].CooldownUntil == 50, "join shield finite with cooldown after expiration")
+	check(f.LockCalls[#f.LockCalls].Remaining == 30, "join shield rendered")
+	f.Now = 20
+	s:OnJoin(p)
+	check(s.Locks[p].Until == 30, "repeated join hook cannot renew shield")
+	check(not s:Lock(p) and s.Locks[p].Until == 30, "active lock cannot be extended")
+	f.Now = 30
+	check(not s:IsLocked(p), "shield expires at exact boundary")
+	s:Tick(1)
+	check(not f.LockCalls[#f.LockCalls].Locked, "expiration opens actual world gate")
+	check(not s:Lock(p), "cooldown begins after shield expiration")
+	f.Now = 49.99
+	check(not s:Lock(p), "lock remains unavailable until cooldown boundary")
+	f.Now = 50
+	check(s:Lock(p), "lock available at cooldown boundary")
+	check(s.Locks[p].Until == 110 and s.Locks[p].CooldownUntil == 130, "manual lock has finite duration and subsequent cooldown")
+	f.Now = 70
+	check(s:SecurityUpgrade(p), "server security upgrade purchased")
+	check(s:LockDuration(p) == 70 and s.Locks[p].Until == 110, "security extends next lock without refreshing current protection")
+	f.Now = 110
+	check(not s:IsLocked(p) and not s:Lock(p), "manual lock expires without extending itself")
+	f.Now = 130
+	check(s:Lock(p) and s.Locks[p].Until == 200, "upgraded security affects real subsequent lock")
+	check(not s:Lock(p) and s.Locks[p].Until == 200, "repeated paid-tier lock requests still cannot extend")
+	s:Release(p)
+	check(s.Locks[p] == nil and s.Joined[p] == nil and not f.LockCalls[#f.LockCalls].Locked, "release removes state and opens gate")
 end
-now += 86400
-local giftCash, giftClaim = profile.Cash, profile.DailyReward.LastClaim
-check(not quests:ClaimDaily(player), "Gift reward rejects full storage")
-check(profile.Cash == giftCash and profile.DailyReward.LastClaim == giftClaim and gifts == 0,
-    "Rejected item gift does not partially award cash, consume day, or add an item")
-storageFull = false
-check(quests:ClaimDaily(player), "Item gift succeeds after freeing storage")
-check(gifts == 1 and profile.Inventory.gift1.ItemId == "GamingChair", "One correct item gift is created")
-check(not quests:ClaimDaily(player) and gifts == 1, "Item gift cannot be duplicated by repeating claim")
-profile.DailyReward.CurrentDay = 7
-now += 86400
-check(quests:ClaimDaily(player), "Day seven can be claimed")
-check(profile.OwnedThemes.Midnight == true and profile.DailyReward.CurrentDay == 1, "Theme unlock and seven-day wrap persist")
-profile.DailyReward.CurrentDay = 5
-now += 172800
-check(quests:Get(player).DailyReward.Day == 1, "Missing the configured streak window resets the reward day")
 
-profile.FirstJoin = true
-profile.TutorialStep = 1
-check(not quests:UpdateTutorial(player, "StealItems"), "Tutorial cannot skip server-observed prerequisite")
-for _, action in ipairs({ "VisitHouses", "StealItems", "CompleteRobbery", "PlaceItem", "Upgrade" }) do
-    check(quests:UpdateTutorial(player, action), "Validated tutorial action advances one step")
+do
+	for _, block in ipairs({ "NearLock", "Home", "Alive", "Writable", "Loaded" }) do
+		local f = fixture()
+		f[block] = false
+		check(not f.Service:Lock(f.Player) and f.Service.Locks[f.Player] == nil, "lock rejects unavailable " .. block)
+	end
+	local f = fixture()
+	f.Plot.Owner = f.Other
+	check(not f.Service:Lock(f.Player), "another player's plot cannot be locked")
+	f.Plot.Owner = f.Player
+	f.Profile.Pending = { Kind = "Buy" }
+	check(not f.Service:Lock(f.Player), "lock is blocked during durable house intent")
 end
-check(profile.FirstJoin == false and quests:Get(player).Tutorial.Complete, "Tutorial completion is persistent")
-check(not quests:UpdateTutorial(player, "Upgrade"), "Tutorial completion cannot replay")
 
-profile.Statistics.ItemsStolen = 100
-quests:Progress(player, "StealItems", 1)
-check(profile.Achievements.Thief.Unlocked == true, "Achievement reads authoritative lifetime stats")
-check(quests:Claim(player, "Achievement:Thief"), "Unlocked achievement has a claimable reward")
-local achievementCash = profile.Cash
-check(not quests:Claim(player, "Achievement:Thief") and profile.Cash == achievementCash, "Achievement reward is idempotent")
-profile.Quests.Daily = { "EscapeOnce" }
-profile.Quests.Progress["Daily:EscapeOnce"] = 1
-profile.Quests.Claimed["Daily:EscapeOnce"] = nil
-local originalCash = profile.Cash
-profile.Cash = Config.Economy.MaxCash or 1000000000000
-check(not quests:Claim(player, "EscapeOnce"), "Cash cap rejects an ungrantable quest reward")
-check(profile.Quests.Claimed["Daily:EscapeOnce"] == nil, "Failed reward leaves quest available")
-profile.Cash = originalCash
-check(not quests:AwardXP(player, math.huge) and not quests:AwardXP(player, 0 / 0), "Non-finite XP is rejected")
-writable = false
-local unavailableCash = profile.Cash
-check(not quests:ClaimDaily(player) and not quests:AwardXP(player, 10), "Read-only/unloaded profiles cannot receive progression rewards")
-check(profile.Cash == unavailableCash, "Read-only progression never mutates cash")
-writable = true
-
-local originalAmbient = { Original = true }
-ctx.Lighting = { ClockTime = 12, Brightness = 2, Ambient = originalAmbient, OutdoorAmbient = originalAmbient }
-ctx.Color3 = { fromRGB = function(r, g, b) return { r, g, b } end }
-ctx.Players = { GetPlayers = function() return {} end }
-ctx.Events = EventService.new(ctx)
-check(not ctx.Events:StartEvent("RichNeighbor"), "Unimplemented special-house event is disabled")
-check(not ctx.Events:StartEvent("AlienInvasion"), "Unimplemented special-loot event is disabled")
-check(ctx.Events:StartEvent("Blackout"), "Supported blackout starts")
-check(ctx.Events:Multiplier("Security") == 0.5 and ctx.Lighting.Brightness < 2, "Blackout weakens security and changes lighting")
-now += 60
-check(not ctx.Events:IsActive("Blackout") and ctx.Events:Multiplier("Security") == 1, "Expired event cannot retain gameplay multiplier")
-ctx.Events:Tick(60)
-check(ctx.Lighting.ClockTime == 12 and ctx.Lighting.Ambient == originalAmbient, "Event stop restores original lighting")
-check(ctx.Events:StartEvent("DoubleXP"), "Double XP event starts")
-quests:Progress(player, "StealItems", 1)
-quests:Progress(player, "CompleteRobbery", 1)
-check(profile.Statistics.EventsParticipated == 1, "Validated play during an event counts participation once per event")
-profile.XP, profile.Level = 0, 1
-check(quests:AwardXP(player, 50) and profile.Level == 2 and profile.XP == 0, "XP multiplier and configurable level costs apply server-side")
-ctx.Events:StopEvent()
-now += Config.Game.EventIntervalSeconds
-ctx.Events:Tick(Config.Game.EventIntervalSeconds)
-check(ctx.Events:GetActive() ~= nil, "Scheduler automatically starts a supported event on its cadence")
-ctx.Events:Destroy()
-check(ctx.Events:GetActive() == nil and ctx.Lighting.ClockTime == 12, "Destroy removes event and restores lighting")
-
-local analytics = AnalyticsService.new(ctx)
-analytics:InitPlayer(player)
-analytics:Emit(player, "CashSource", { Amount = 300, Reason = "Sell" })
-analytics:Emit(player, "CashSink", { Amount = 100, Reason = "Upgrade" })
-check(analytics:Get().CashCreated == 300 and analytics:Get().CashDestroyed == 100, "Economy sources and sinks are counted")
-analytics:Emit(player, "invalid label!", {})
-check(analytics:Get().Counters["invalid label!"] == nil, "Unbounded/invalid telemetry event labels are rejected")
-analytics:Milestone(player, "FirstItem")
-analytics:Milestone(player, "FirstItem")
-check(analytics:Get().Counters.FirstItem == 1, "First-session milestone emits once")
-for i = 1, 100 do analytics:Emit(player, "Event" .. i, {}) end
-check(analytics.eventCount == 64, "Metric label cardinality is bounded")
-Config.Game.EnableRobloxAnalytics = true
-ctx.Analytics:Emit(player, "RealBackendCheck", { Reason = "Test" })
-check(telemetryCalls == 0, "Backend telemetry never yields inside Emit")
-drain()
-check(telemetryCalls == 1, "Explicitly enabled telemetry is submitted asynchronously")
-Config.Game.EnableRobloxAnalytics = nil
-
-ctx.CreateInstance = function(class)
-    return setmetatable({ ClassName = class, Children = {} }, {
-        __index = { FindFirstChild = function(self, name) return self.Children[name] end },
-        __newindex = function(self, key, value)
-            rawset(self, key, value)
-            if key == "Parent" then value.Children[self.Name] = self end
-        end,
-    })
+do
+	local f = fixture()
+	local s, p, profile = f.Service, f.Player, f.Profile
+	local expectedCash, expectedSpent = profile.Cash, 0
+	for _, spec in ipairs({
+		{ Method = "BaseUpgrade", Field = "BaseLevel", Definitions = Config.Bases },
+		{ Method = "TreadmillUpgrade", Field = "TreadmillLevel", Definitions = Config.Treadmills },
+		{ Method = "SecurityUpgrade", Field = "SecurityLevel", Definitions = Config.Security },
+	}) do
+		for level = 2, #spec.Definitions do
+			local cost = spec.Definitions[level].Cost
+			expectedCash -= cost
+			expectedSpent += cost
+			check(s[spec.Method](s, p), "valid " .. spec.Method .. " purchase at level " .. level)
+			check(profile[spec.Field] == level and profile.Cash == expectedCash,
+				"server configured price atomically debits and increments only selected level")
+			check(profile.Statistics.TotalSpent == expectedSpent, "spend statistic matches actual configured debits")
+		end
+		check(not s[spec.Method](s, p) and profile.Cash == expectedCash, "max tier rejects without spending")
+	end
+	check(f.SlotCalls[#f.SlotCalls] == 20, "base progression enables twenty actual pads")
+	check(f.TreadmillCalls[#f.TreadmillCalls].Level == #Config.Treadmills, "world treadmill displays earned level")
+	check(s:Multiplier(p) == 1, "variant and size income are not multiplied twice")
+	check(not s:Rebirth(p, true) and profile.Rebirths == 0, "unsupported rebirth cannot spend or grant unverified bonuses")
 end
-local board = LeaderboardService.new(ctx)
-board:InitPlayer(player)
-check(player.Children.leaderstats.Children.Cash.Value == profile.Cash, "Leaderstats reflect server cash")
-check(board:Get().PersistenceEnabled == false, "Studio-memory leaderboard does not access live data stores")
-board:Tick(120)
-check(#queue == 0, "Studio-memory leaderboard schedules no persistence jobs")
-local exposed = board:Get()
-exposed.Live[1].Cash = -100
-check(board:Get().Live[1].Cash == profile.Cash, "Leaderboard snapshots cannot mutate cached standings")
 
-data.Status = "Persistent"
-local stores, writeCalls, readCalls = {}, 0, 0
-local failure = false
-ctx.DataStoreService = {}
-function ctx.DataStoreService:GetOrderedDataStore(name)
-    stores[name] = stores[name] or { Entries = {} }
-    local store = stores[name]
-    function store:UpdateAsync(key, callback)
-        writeCalls += 1
-        if failure and string.find(name, "Robberies", 1, true) then error("simulated outage") end
-        self.Entries[key] = callback(self.Entries[key])
-        return self.Entries[key]
-    end
-    function store:GetSortedAsync(_ascending, _count)
-        readCalls += 1
-        local rows = {}
-        for key, value in pairs(self.Entries) do table.insert(rows, { key = key, value = value }) end
-        table.sort(rows, function(a, b) return a.value > b.value end)
-        return { GetCurrentPage = function() return rows end }
-    end
-    return store
+do
+	for _, method in ipairs({ "BaseUpgrade", "TreadmillUpgrade", "SecurityUpgrade", "ClaimDaily" }) do
+		for _, block in ipairs({ "Home", "Alive", "Writable", "Loaded" }) do
+			local f = fixture()
+			f[block] = false
+			local oldCash = f.Profile.Cash
+			check(not f.Service[method](f.Service, f.Player) and f.Profile.Cash == oldCash,
+				method .. " requires available own base/profile: " .. block)
+		end
+		for _, block in ipairs({ "Pending", "Busy", "Carrying", "Closing", "ForeignPlot" }) do
+			local f = fixture()
+			if block == "Pending" then f.Profile.Pending = { Kind = "Buy" }
+			elseif block == "Busy" then f.Context.Houses.Busy[f.Player] = true
+			elseif block == "Carrying" then f.Context.Steal.Carriers[f.Player] = {}
+			elseif block == "Closing" then f.Context.Closing = true
+			else f.Plot.Owner = f.Other end
+			local oldCash = f.Profile.Cash
+			check(not f.Service[method](f.Service, f.Player) and f.Profile.Cash == oldCash,
+				method .. " rejects " .. block .. " without economy mutation")
+		end
+	end
+	for _, method in ipairs({ "BaseUpgrade", "TreadmillUpgrade", "SecurityUpgrade" }) do
+		local f = fixture()
+		f.Profile.Cash = 0
+		check(not f.Service[method](f.Service, f.Player) and f.Profile.Statistics.TotalSpent == 0,
+			"insufficient cash blocks " .. method)
+	end
+	local f = fixture()
+	f.Profile.BaseLevel = 1.5
+	check(not f.Service:BaseUpgrade(f.Player), "malformed profile upgrade level fails closed")
+	f.Profile.BaseLevel = 1
+	f.Profile.Cash = 0 / 0
+	check(not f.Service:BaseUpgrade(f.Player), "nonfinite wallet cannot buy upgrades")
 end
-profile.House.HouseValue = 500
-profile.Statistics.TotalCashEarned = 2000
-profile.Statistics.SuccessfulRobberies = 5
-local persistent = LeaderboardService.new(ctx)
-persistent:InitPlayer(player)
-check(writeCalls == 0 and readCalls == 0, "Initializing live stats performs no yielding data calls")
-persistent:Tick(90)
-check(writeCalls == 0 and #queue == 2, "Scheduled ordered-store I/O is deferred")
-drain()
-check(writeCalls == 4 and readCalls == 4, "Four global metrics are saved/read on a coarse cadence")
-local peakName = Config.Game.ProfileStore .. "_Rank_HouseValue"
-check(stores[peakName].Entries[tostring(player.UserId)] == 500, "Global house value records highest-ever value")
-profile.House.HouseValue = 100
-profile.Statistics.TotalCashEarned += 100
-persistent:Update(player)
-persistent:Flush()
-drain()
-check(stores[peakName].Entries[tostring(player.UserId)] == 500, "Lower house value cannot erase lifetime record")
-local readsBefore = readCalls
-persistent:Tick(1)
-drain()
-check(readCalls == readsBefore, "Global leaderboard reads are cached between refreshes")
 
-failure = true
-profile.Statistics.SuccessfulRobberies += 1
-persistent:Update(player)
-persistent:Flush()
-drain()
-check(persistent.pending[player.UserId] ~= nil, "Failed ordered-store writes remain pending")
-failure = false
-persistent:Update(player)
-persistent:Flush()
-drain()
-check(persistent.pending[player.UserId] == nil, "Failed metric write retries without regranting gameplay rewards")
-persistent:Remove(player)
-check(#persistent:Get().Live == 0, "Leaving player is removed from live standings")
-drain()
-print("Passed " .. checks .. " progression, event, analytics, and leaderboard checks")
+do
+	local f = fixture()
+	local s, p = f.Service, f.Player
+	check(s:Speed(p) == 20 and s:MovementSpeed(p) == 20, "fresh player has normal server walk speed")
+	check(not s:SetSprint(p, "true"), "sprint strictly validates boolean")
+	check(s:SetSprint(p, true) and f.Humanoid.WalkSpeed == 26, "server sprint adds six speed")
+	check(not s:Train(p, 500000), "client XP amount cannot enable training")
+	check(s:Train(p, true) and s.Training[p] and f.Humanoid.WalkSpeed == 0, "treadmill toggles fixed server training state")
+	check(f.Attributes.HouseTraining == true and s.Sprinting[p] == nil, "training sets character indicator and clears sprint")
+	check(s:Train(p, true) and f.Profile.SpeedXP == 0, "repeated start grants no instant XP")
+	s:Tick(0.25)
+	check(f.Profile.SpeedXP == 0.125, "training uses current tier rate and actual fractional server dt")
+	f.Profile.SpeedXP = 19.9
+	s:Tick(0.25)
+	check(s:Speed(p) == 22 and f.Humanoid.WalkSpeed == 0, "earned threshold updates speed without unfreezing training")
+	check(s:Train(p, false) and f.Humanoid.WalkSpeed == 22 and f.Attributes.HouseTraining == false,
+		"stopping restores actual earned speed without anchoring character")
+	check(s:SetSprint(p, true) and f.Humanoid.WalkSpeed == 28, "sprint scales with training progress")
+	f.Context.Steal.Carriers[p] = {}
+	s:UpdateSpeed(p)
+	check(f.Humanoid.WalkSpeed == 12 and s:Speed(p) == 22, "carrying speed takes priority without changing earned progression")
+	check(not s:Train(p, true), "carrying cannot start treadmill training")
+	f.Context.Steal.Carriers[p] = nil
+	check(s:Train(p, true), "training resumes when hands empty")
+	f.Profile.TreadmillLevel = 3
+	local xp = f.Profile.SpeedXP
+	s:Tick(2)
+	check(f.Profile.SpeedXP == xp + 4, "higher treadmill rate applies from server profile only")
+	f.Profile.SpeedXP = 1e9 - 1
+	s:Tick(10)
+	check(f.Profile.SpeedXP == 1e9 and s:Speed(p) == 80, "XP and earned movement speed are capped")
+	s:Train(p, false)
+	s:SetSprint(p, true)
+	check(f.Humanoid.WalkSpeed == 86, "maximum earned sprint speed is eighty-six")
+	s:Release(p)
+	check(s.Training[p] == nil and s.Sprinting[p] == nil, "release clears all training and sprint references")
+end
+
+do
+	for _, block in ipairs({ "NearTreadmill", "Home", "Alive", "Writable", "Loaded",
+		"Pending", "Busy", "Carrying", "Closing", "ForeignPlot" }) do
+		local f = fixture()
+		check(f.Service:Train(f.Player, true), "setup begins valid training")
+		local xp = f.Profile.SpeedXP
+		if block == "Pending" then f.Profile.Pending = { Kind = "Buy" }
+		elseif block == "Busy" then f.Context.Houses.Busy[f.Player] = true
+		elseif block == "Carrying" then f.Context.Steal.Carriers[f.Player] = {}
+		elseif block == "Closing" then f.Context.Closing = true
+		elseif block == "ForeignPlot" then f.Plot.Owner = f.Other
+		else f[block] = false end
+		f.Service:Tick(5)
+		check(f.Profile.SpeedXP == xp and f.Service.Training[f.Player] == nil,
+			"each server tick stops training without awarding XP when " .. block)
+		check(not f.Service:Train(f.Player, true), "training cannot restart under " .. block)
+		check(f.Service:Train(f.Player, false), "stop request remains safe under " .. block)
+	end
+	local f = fixture()
+	check(f.Service:Train(f.Player, true), "setup dt validation")
+	for _, dt in ipairs({ -1, 0, 0 / 0, math.huge, -math.huge }) do
+		f.Service:Tick(dt)
+		check(f.Profile.SpeedXP == 0, "invalid elapsed time cannot award XP")
+	end
+end
+
+do
+	local f = fixture()
+	local s, p, profile = f.Service, f.Player, f.Profile
+	local cash, earnings = profile.Cash, 0
+	for day = 100, 108 do
+		f.Clock = day * 86400 + 86399
+		local reward = Config.DailyRewards[(day - 100) % 7 + 1]
+		cash += reward
+		earnings += reward
+		check(s:ClaimDaily(p), "new server UTC day allows daily reward")
+		check(profile.Cash == cash and profile.Statistics.TotalEarned == earnings,
+			"cash and earned stats receive exactly server configured reward")
+		check(profile.DailyDay == day and profile.DailyStreak == (day - 100) % 7 + 1,
+			"consecutive streak cycles after seventh reward")
+		check(not s:ClaimDaily(p) and profile.Cash == cash, "same UTC day duplicate fails without awarding cash")
+	end
+	f.Clock = 110 * 86400
+	check(s:ClaimDaily(p) and profile.DailyStreak == 1, "missed UTC day resets streak")
+	f.Clock = 109 * 86400
+	check(not s:ClaimDaily(p), "earlier server date cannot replay claimed rewards")
+	profile.Cash = Config.Game.MaxCash - 10
+	f.Clock = 111 * 86400
+	local previousEarned = profile.Statistics.TotalEarned
+	check(s:ClaimDaily(p) and profile.Cash == Config.Game.MaxCash,
+		"daily reward safely caps wallet")
+	check(profile.Statistics.TotalEarned == previousEarned + 10, "income statistics count actual credited cash")
+	f.Clock = 112 * 86400
+	check(not s:ClaimDaily(p) and profile.DailyDay == 111, "full wallet does not consume daily claim")
+	profile.Cash = 0
+	check(s:ClaimDaily(p) and profile.DailyDay == 112, "daily claim still available after freeing wallet capacity")
+end
+
+print("PASS: " .. checks .. " progression checks (server clocks, fixed locks, upgrades, training, daily rewards).")
